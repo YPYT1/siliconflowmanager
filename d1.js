@@ -46,11 +46,6 @@ async function handleRequest(request) {
     return handleAdminAPI(request, path.replace("/admin/api/", ""));
   }
 
-  // API代理路由 - 转发请求到siliconflow API并进行负载均衡
-  if (path.startsWith("/v1/")) {
-    return handleAPIProxy(request, path);
-  }
-
   // 模型列表API（带缓存）
   if (path === "/api/models") {
     return handleModelsAPI(request);
@@ -59,6 +54,22 @@ async function handleRequest(request) {
   // 模型列表页面
   if (path === "/models" || path === "/models/") {
     return handleModelsPage(request);
+  }
+
+  // API代理路由 - 转发请求到siliconflow API并进行负载均衡
+  if (path.startsWith("/v1/")) {
+    return handleAPIProxy(request, path);
+  }
+
+  // 兼容不带/v1前缀的API请求（如 /chat/completions）
+  if (
+    path.startsWith("/chat/") ||
+    path.startsWith("/completions") ||
+    path.startsWith("/embeddings") ||
+    path.startsWith("/images/") ||
+    path.startsWith("/audio/")
+  ) {
+    return handleAPIProxy(request, "/v1" + path);
   }
 
   // 主界面
@@ -801,53 +812,117 @@ async function handleAPIProxy(request, path) {
     );
   }
 
-  // 负载均衡 - 随机选择一个密钥
-  const randomIndex = Math.floor(Math.random() * validKeys.length);
-  const selectedKey = validKeys[randomIndex].key;
+  // 克隆请求体用于重试（流式请求体只能读取一次）
+  const requestBody = request.body ? await request.clone().text() : null;
 
-  // 克隆请求并修改头信息
-  const newHeaders = new Headers(request.headers);
-  newHeaders.set("Authorization", `Bearer ${selectedKey}`);
+  // 重试逻辑：最多尝试3次，每次使用不同的Key
+  const maxRetries = Math.min(3, validKeys.length);
+  const usedIndices = new Set();
+  let lastResponse = null;
+  let lastError = null;
 
-  // 移除host头以避免冲突
-  newHeaders.delete("host");
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    // 随机选择一个未使用过的密钥
+    let randomIndex;
+    do {
+      randomIndex = Math.floor(Math.random() * validKeys.length);
+    } while (
+      usedIndices.has(randomIndex) &&
+      usedIndices.size < validKeys.length
+    );
+    usedIndices.add(randomIndex);
 
-  // 创建新请求
-  const newRequest = new Request(`https://api.siliconflow.cn${path}`, {
-    method: request.method,
-    headers: newHeaders,
-    body: request.body,
-    redirect: "follow",
-  });
+    const selectedKey = validKeys[randomIndex].key;
 
-  // 转发请求
-  const response = await fetch(newRequest);
+    // 克隆请求并修改头信息
+    const newHeaders = new Headers(request.headers);
+    newHeaders.set("Authorization", `Bearer ${selectedKey}`);
+    newHeaders.delete("host");
 
-  // 创建一个新的响应用于流式传输（如果需要）
-  const newResponse = new Response(response.body, response);
+    // 创建新请求
+    const newRequest = new Request(`https://api.siliconflow.cn${path}`, {
+      method: request.method,
+      headers: newHeaders,
+      body: requestBody,
+      redirect: "follow",
+    });
 
-  // 添加完整的CORS头
-  newResponse.headers.set("Access-Control-Allow-Origin", "*");
-  newResponse.headers.set(
-    "Access-Control-Allow-Methods",
-    "GET, POST, PUT, DELETE, OPTIONS"
+    try {
+      // 转发请求
+      const response = await fetch(newRequest);
+
+      // 检查是否需要重试（503繁忙错误）
+      if (response.status === 503) {
+        // 尝试读取错误信息
+        const clonedResponse = response.clone();
+        try {
+          const errorData = await clonedResponse.json();
+          // 检查是否是繁忙错误
+          if (
+            errorData.code === 50603 ||
+            (errorData.message && errorData.message.includes("busy"))
+          ) {
+            lastResponse = response;
+            lastError = errorData.message || "System busy";
+            continue; // 重试
+          }
+        } catch (e) {
+          // 无法解析JSON，继续重试
+          lastResponse = response;
+          continue;
+        }
+      }
+
+      // 请求成功或非繁忙错误，返回响应
+      const newResponse = new Response(response.body, response);
+
+      // 添加完整的CORS头
+      newResponse.headers.set("Access-Control-Allow-Origin", "*");
+      newResponse.headers.set(
+        "Access-Control-Allow-Methods",
+        "GET, POST, PUT, DELETE, OPTIONS"
+      );
+      newResponse.headers.set(
+        "Access-Control-Allow-Headers",
+        "Content-Type, Authorization, X-Requested-With"
+      );
+      newResponse.headers.set("Access-Control-Allow-Credentials", "true");
+      newResponse.headers.set("Access-Control-Max-Age", "86400");
+
+      // 禁用缓存以支持流式传输
+      newResponse.headers.set(
+        "Cache-Control",
+        "no-store, no-cache, must-revalidate, proxy-revalidate"
+      );
+      newResponse.headers.set("Pragma", "no-cache");
+      newResponse.headers.set("Expires", "0");
+
+      return newResponse;
+    } catch (error) {
+      lastError = error.message;
+      continue; // 网络错误，重试
+    }
+  }
+
+  // 所有重试都失败，返回最后的错误
+  if (lastResponse) {
+    const newResponse = new Response(lastResponse.body, lastResponse);
+    newResponse.headers.set("Access-Control-Allow-Origin", "*");
+    return newResponse;
+  }
+
+  return new Response(
+    JSON.stringify({
+      error: { message: `所有API密钥都繁忙，请稍后重试: ${lastError}` },
+    }),
+    {
+      status: 503,
+      headers: {
+        "Content-Type": "application/json",
+        "Access-Control-Allow-Origin": "*",
+      },
+    }
   );
-  newResponse.headers.set(
-    "Access-Control-Allow-Headers",
-    "Content-Type, Authorization, X-Requested-With"
-  );
-  newResponse.headers.set("Access-Control-Allow-Credentials", "true");
-  newResponse.headers.set("Access-Control-Max-Age", "86400");
-
-  // 禁用缓存以支持流式传输
-  newResponse.headers.set(
-    "Cache-Control",
-    "no-store, no-cache, must-revalidate, proxy-revalidate"
-  );
-  newResponse.headers.set("Pragma", "no-cache");
-  newResponse.headers.set("Expires", "0");
-
-  return newResponse;
 }
 
 // D1工具函数 - 获取配置值
@@ -3418,7 +3493,7 @@ curl -X POST 'https://siliconflow-manager.ypyt147.workers.dev/v1/chat/completion
             </div>
             <div class="api-code">
     <span class="comment"># 基础地址（不带v1）</span>
-    <span class="copy-line" onclick="copyText('https://siliconflow-manager.ypyt147.workers.dev/')">https://siliconflow-manager.ypyt147.workers.dev/</span>
+    <span class="copy-line" onclick="copyText('https://siliconflow-manager.ypyt147.workers.dev')">https://siliconflow-manager.ypyt147.workers.dev</span>
 
     <span class="comment"># API地址（带v1）</span>
     <span class="copy-line" onclick="copyText('https://siliconflow-manager.ypyt147.workers.dev/v1')">https://siliconflow-manager.ypyt147.workers.dev/v1</span>
