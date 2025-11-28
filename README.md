@@ -82,7 +82,8 @@ curl -X POST 'https://你的域名/v1/chat/completions' \
 ## 🖼️ 界面预览
 
 ### 前台密钥浏览界面
-![image-20251128171101947](C:\Users\Administrator\AppData\Roaming\Typora\typora-user-images\image-20251128171101947.png)
+<img width="1912" height="962" alt="image" src="https://github.com/user-attachments/assets/6784aac7-5ecd-4153-88ab-529413d6e384" />
+
 
 ### 管理员界面
 ![管理员仪表盘](https://imgbed.killerbest.com/file/1742612540433_image.png)
@@ -97,8 +98,8 @@ curl -X POST 'https://你的域名/v1/chat/completions' \
 ![系统设置界面](https://imgbed.killerbest.com/file/1742612987996_image.png)
 
 ## 增加的模型列表
+<img width="1912" height="962" alt="image" src="https://github.com/user-attachments/assets/82b25149-a983-410a-9fb0-1586c364d836" />
 
-![image-20251128171150035](C:\Users\Administrator\AppData\Roaming\Typora\typora-user-images\image-20251128171150035.png)
 
 ## 🚀 部署教程
 
